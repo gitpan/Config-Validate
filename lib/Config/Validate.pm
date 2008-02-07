@@ -1,6 +1,8 @@
 package Config::Validate;
+
 use strict;
 use warnings;
+use 5.008;
 
 # There is too much DWIMery here for this to be practical
 ## no critic (RequireArgUnpacking, ProhibitDoubleSigils)
@@ -19,18 +21,36 @@ use warnings;
   our @EXPORT_OK = qw(validate mkpath);
   our %EXPORT_TAGS = ('all' => \@EXPORT_OK);
   
-  our $VERSION = '0.1.0';
+  our $VERSION = '0.2.0';
 
-  my @schema :Field :Accessor(schema) :Arg(schema);
+  my @schema              :Field 
+                          :Accessor(schema) 
+                          :Arg(schema);
   my @array_allows_scalar :Field 
                           :Accessor(array_allows_scalar) 
-                          :Arg(Name => 'array_allows_scalar', Default => 1);
-  my @debug  :Field :Accessor(debug) :Arg(debug);
-  my @on_debug :Field 
-               :Accessor(on_debug) 
-               :Arg(on_debug) 
-               :Default(\&debug_print);
-  my @types  :Field;
+                          :Arg(array_allows_scalar)
+                          :Default(1);
+  my @debug               :Field 
+                          :Accessor(debug) 
+                          :Arg(debug);
+  my @on_debug            :Field 
+                          :Accessor(on_debug) 
+                          :Arg(on_debug) 
+                          :Default(\&debug_print);
+  my @data_path           :Field 
+                          :Accessor(data_path) 
+                          :Arg(data_path)
+                          :Default(0);
+  my @data_path_options   :Field 
+                          :Accessor(data_path_options)
+                          :Arg(data_path_options)
+                          :Default( {} );
+
+  my @types               :Field;
+
+  ## no critic(ProhibitSubroutinePrototypes)
+  sub _throw (@);
+  ## use critic
 
   my %default_types = (
     integer   => { validate => \&_validate_integer },
@@ -45,15 +65,27 @@ use warnings;
     file      => { validate => \&_validate_file },
     domain    => { validate => \&_validate_domain },
     hostname  => { validate => \&_validate_hostname },
-    nested    => { validate => sub { croak "'nested' is not valid here"; }},
+    nested    => { validate => sub { _throw "'nested' is not valid here"; }},
   );
 
   my %types = %default_types;
+
+  my $have_data_path;
 
   sub _init :Init {
     my ($self, $args) = @_;
     
     $types[$$self] = clone(\%types);
+
+    unless (defined $have_data_path) {
+      eval { require Data::Path; };
+      $have_data_path = $@ eq '' ? 1 : 0;
+    }
+
+    if ($self->data_path and not $have_data_path) {
+      _throw "Data::Path requested, but cannot find module";
+    }
+
     return;
   }
 
@@ -94,13 +126,13 @@ use warnings;
     }
 
     if (defined $types{$p{name}}) {
-      croak "Attempted to add type '$p{name}' that already exists";
+      _throw "Attempted to add type '$p{name}' that already exists";
     }
 
     my $type = clone(\%p);
     delete $type->{name};
     if (keys %$type == 0) {
-      croak "No callbacks defined for type '$p{name}'";
+      _throw "No callbacks defined for type '$p{name}'";
     }
     $types{$p{name}} = $type;
     
@@ -113,13 +145,13 @@ use warnings;
     my %p = _parse_add_type_params(@_);
     
     if (defined $types[$$self]{$p{name}}) {
-      croak "Attempted to add type '$p{name}' that already exists";
+      _throw "Attempted to add type '$p{name}' that already exists";
     }
     
     my $type = clone(\%p);
     delete $type->{name};
     if (keys %$type == 0) {
-      croak "No callbacks defined for type '$p{name}'";
+      _throw "No callbacks defined for type '$p{name}'";
     }
     $types[$$self]{$p{name}} = $type;
     return;
@@ -150,7 +182,7 @@ use warnings;
     my (@args) = @_;
 
     if (@args < 2) {
-      croak "Config::Validate::validate requires at least two arguments";
+      _throw "Config::Validate::validate requires at least two arguments";
     }
 
     my $self;
@@ -190,10 +222,20 @@ use warnings;
     my ($config, $schema) = (clone($args{config}), 
                              clone($args{schema}));
 
+    # Not sure if Config::General object will be extended or not, so
+    # assume anything in Config::General namespace as a getall method.
+    my $config_type = ref $config;
+    if ($config_type =~ /^Config::General/ix) {
+      $config = { $config->getall() };
+    }
+
     $self->_type_callback('init', $self, $schema, $config);
     $self->_validate($config, $schema, []);
     $self->_type_callback('finish', $self, $schema, $config);
 
+    if ($self->data_path) {
+      return Data::Path->new($config, $self->data_path_options);
+    }
     return $config;
   }
 
@@ -227,7 +269,7 @@ use warnings;
         
         if (defined $def->{callback}) {
           if (ref $def->{callback} ne 'CODE') {
-            croak sprintf("%s: callback specified is not a code reference", 
+            _throw sprintf("%s: callback specified is not a code reference", 
                         mkpath(@curpath));
           }
           $def->{callback}($self, $cfg->{$canonical_name}, $def, \@curpath);
@@ -243,15 +285,17 @@ use warnings;
       delete $orig->{$canonical_name};
 
       if (not $found and (not defined $def->{optional} or not $def->{optional})) {
-        croak "Required item " . mkpath(@curpath) . " was not found";
+        _throw "Required item " . mkpath(@curpath) . " was not found";
       }
     }
 
     my @unknown = sort keys %$orig;
     if (@unknown != 0) {
-      croak sprintf("%s: the following unknown items were found: %s",
+      _throw sprintf("%s: the following unknown items were found: %s",
                   mkpath($path), join(', ', @unknown));
     }
+
+    return;
   }
 
   sub _invoke_validate_callback {
@@ -261,7 +305,7 @@ use warnings;
     my $callback = $typeinfo->{validate};
 
     if (not defined $callback) {
-      croak("No callback defined for type '$def->{type}'");
+      _throw("No callback defined for type '$def->{type}'");
     }
       
     if ($typeinfo->{byreference}) {
@@ -283,7 +327,7 @@ use warnings;
       } elsif (ref $definition->{alias} eq '') {
         push(@names, $definition->{alias});
       } else {
-        croak sprintf("Alias defined for %s is type %s, but must be " . 
+        _throw sprintf("Alias defined for %s is type %s, but must be " . 
                       "either an array reference, or scalar",
                       mkpath(@curpath), ref $definition->{alias},
                      );
@@ -295,11 +339,11 @@ use warnings;
   sub _check_definition_type {
     my ($self, $definition, @curpath) = @_;
     if (not defined $definition->{type}) {
-      croak "No type specified for " . mkpath(@curpath);
+      _throw "No type specified for " . mkpath(@curpath);
     }
 
     if (not defined $types[$$self]{$definition->{type}}) {
-      croak "Invalid type '$definition->{type}' specified for ", 
+      _throw "Invalid type '$definition->{type}' specified for ", 
         mkpath(@curpath);
     }
 
@@ -317,15 +361,15 @@ use warnings;
     my ($self, $value, $def, $path) = @_;
     
     if (not defined $def->{keytype}) {
-      croak "No keytype specified for " . mkpath(@$path);
+      _throw "No keytype specified for " . mkpath(@$path);
     }
     
     if (not defined $types[$$self]{$def->{keytype}}) {
-      croak "Invalid keytype '$def->{keytype}' specified for " . mkpath(@$path);
+      _throw "Invalid keytype '$def->{keytype}' specified for " . mkpath(@$path);
     }
 
     if (ref $value ne 'HASH') {
-      croak sprintf("%s: should be a 'HASH', but instead is '%s'", 
+      _throw sprintf("%s: should be a 'HASH', but instead is '%s'", 
                   mkpath($path), ref $value);
     }
 
@@ -345,11 +389,11 @@ use warnings;
     my ($self, $value, $def, $path) = @_;
     
     if (not defined $def->{subtype}) {
-      croak "No subtype specified for " . mkpath(@$path);
+      _throw "No subtype specified for " . mkpath(@$path);
     }
 
     if (not defined $types[$$self]{$def->{subtype}}) {
-      croak "Invalid subtype '$def->{subtype}' specified for " . mkpath(@$path);
+      _throw "Invalid subtype '$def->{subtype}' specified for " . mkpath(@$path);
     }
     
     if (ref $value eq 'SCALAR' and $array_allows_scalar[$$self]) {
@@ -360,7 +404,7 @@ use warnings;
     }
 
     if (ref $value ne 'ARRAY') {
-      croak sprintf("%s: should be an 'ARRAY', but instead is a '%s'", 
+      _throw sprintf("%s: should be an 'ARRAY', but instead is a '%s'", 
                   mkpath($path), ref $value);
     }
 
@@ -375,33 +419,37 @@ use warnings;
   sub _validate_integer {
     my ($self, $value, $def, $path) = @_;
     if ($value !~ /^ -? \d+ $/xo) {
-      croak sprintf("%s should be an integer, but has value of '%s' instead",
+      _throw sprintf("%s should be an integer, but has value of '%s' instead",
                   mkpath($path), $value);
     }
     if (defined $def->{max} and $value > $def->{max}) {
-      croak sprintf("%s: %d is larger than the maximum allowed (%d)", 
+      _throw sprintf("%s: %d is larger than the maximum allowed (%d)", 
                   mkpath($path), $value, $def->{max});
     }
     if (defined $def->{min} and $value < $def->{min}) {
-      croak sprintf("%s: %d is smaller than the minimum allowed (%d)", 
+      _throw sprintf("%s: %d is smaller than the minimum allowed (%d)", 
                   mkpath($path), $value, $def->{max});
     }
+
+    return;
   }
 
   sub _validate_float {
     my ($self, $value, $def, $path) = @_;
     if ($value !~ /^ -? \d*\.?\d+ $/xo) {
-      croak sprintf("%s should be an float, but has value of '%s' instead",
+      _throw sprintf("%s should be an float, but has value of '%s' instead",
                   mkpath($path), $value);
     }
     if (defined $def->{max} and $value > $def->{max}) {
-      croak sprintf("%s: %f is larger than the maximum allowed (%f)", 
+      _throw sprintf("%s: %f is larger than the maximum allowed (%f)", 
                   mkpath($path), $value, $def->{max});
     }
     if (defined $def->{min} and $value < $def->{min}) {
-      croak sprintf("%s: %f is smaller than the minimum allowed (%f)", 
+      _throw sprintf("%s: %f is smaller than the minimum allowed (%f)", 
                   mkpath($path), $value, $def->{max});
     }
+    
+    return;
   }
 
   sub _validate_string {
@@ -409,22 +457,24 @@ use warnings;
     
     if (defined $def->{maxlen}) {
       if (length($value) > $def->{maxlen}) {
-        croak sprintf("%s: length of string is %d, but must be less than %d",
+        _throw sprintf("%s: length of string is %d, but must be less than %d",
                     mkpath($path), length($value), $def->{maxlen});
       }
     }
     if (defined $def->{minlen}) {
       if (length($value) < $def->{minlen}) {
-        croak sprintf("%s: length of string is %d, but must be greater than %d",
+        _throw sprintf("%s: length of string is %d, but must be greater than %d",
                     mkpath($path), length($value), $def->{minlen});
       }
     }
     if (defined $def->{regex}) {
       if ($value !~ $def->{regex}) {
-        croak sprintf("%s: regex (%s) didn't match '%s'", mkpath($path),
+        _throw sprintf("%s: regex (%s) didn't match '%s'", mkpath($path),
                     $def->{regex}, $value);
       }
     }
+
+    return;
   }
 
   sub _validate_boolean {
@@ -432,20 +482,23 @@ use warnings;
     
     my @true  = qw(y yes t true on);
     my @false = qw(n no f false off);
+    $value =~ s/\s+//xg;
     $value = 1 if any { lc($value) eq $_ } @true;
     $value = 0 if any { lc($value) eq $_ } @false;
     
     if ($value !~ /^ [01] $/x) {
-      croak sprintf("%s: invalid value '%s', must be: %s", mkpath($path),
+      _throw sprintf("%s: invalid value '%s', must be: %s", mkpath($path),
                   $value, join(', ', (0, 1, @true, @false)));
     }
+
+    return;
   }
   
   sub _validate_directory {
     my ($self, $value, $def, $path) = @_;
 
     if (not -d $value) {
-      croak sprintf("%s: '%s' is not a directory", mkpath($path), $value)
+      _throw sprintf("%s: '%s' is not a directory", mkpath($path), $value)
     }
     return;
   }
@@ -454,7 +507,7 @@ use warnings;
     my ($self, $value, $def, $path) = @_;
 
     if (not -f $value) {      
-      croak sprintf("%s: '%s' is not a file", mkpath($path), $value);
+      _throw sprintf("%s: '%s' is not a file", mkpath($path), $value);
     }
     return;
   }
@@ -468,9 +521,11 @@ use warnings;
                                  domain_private_tld => qr/.*/x,
                                 }
                       );
-    return if $rc;
-
-    croak sprintf("%s: '%s' is not a valid domain name.", mkpath($path), $value);
+    if (not $rc) {
+      _throw sprintf("%s: '%s' is not a valid domain name.", 
+                     mkpath($path), $value);
+    }
+    return;
   }
   
   sub _validate_hostname {
@@ -482,9 +537,12 @@ use warnings;
                                    domain_private_tld => qr/\. acmedns $/xi,
                                   }
                       );
-    return if $rc;
+    if (not $rc) {
+      _throw sprintf("%s: '%s' is not a valid hostname.", 
+                     mkpath($path), $value);
+    }
 
-    croak sprintf("%s: '%s' is not a valid hostname.", mkpath($path), $value);
+    return;
   }
 
   sub _debug {
@@ -501,6 +559,14 @@ use warnings;
     return;
   }
 
+  ## no critic
+  sub _throw (@) {
+    # Turn off O::IO exception handler
+    local $SIG{__DIE__};
+    croak @_;
+  }
+  ## use critic
+
 }
 1;
 
@@ -513,18 +579,18 @@ configuration files. (Or anywhere else)
 
 =head1 VERSION
 
-Version 0.1.0
+Version 0.2.0
 
 =head1 DESCRIPTION
 
-This module is intended to be used to validate configuration data that
-has been read in already and is in a Perl data structure.  It does not
-handle reading or parsing configuration files since there are a
-plethora of available modules on CPAN to do that task.  Instead if
-concentrates on verifying that the data read is correct, and providing
-defaults where appropriate.  It also allows you to specify that a
-given configuration key may be available under several aliases, and
-have those renamed to the canonical name automatically.
+This module is for validating configuration data that has been read in
+already and is in a Perl data structure.  It does not handle reading
+or parsing configuration files since there are a plethora of available
+modules on CPAN to do that task.  Instead it concentrates on verifying
+that the data read is correct, and providing defaults where
+appropriate.  It also allows you to specify that a given configuration
+key may be available under several aliases, and have those renamed to
+the canonical name automatically.
 
 The basic model used is that the caller provides a schema as a perl
 data structure that describes the constraints to verify against.  The
@@ -558,12 +624,11 @@ This module has the following features:
 =head1 SCHEMA DEFINITION
 
 The most complex part of using C<Config::Validate> is defining the
-schema to validate against.  The schema takes the form of a series of
-one or more levels of nested hashes.
+schema to validate against.  The schema takes the form of set of
+nested hashes.
 
 Here is an example schema you might use if you were writing something
-that needs information on an SMTP server to use, and a database server
-to use:
+that needs to validate a database connection configuration file.
 
   my $schema = { db => { 
                     type => 'nested',
@@ -613,9 +678,9 @@ to use:
 This is a somewhat long example of what a schema can look like.  This
 uses most of the features available.  The basic format is that a
 schema consists of a hash of hashes.  Each of it's children describe a
-single key in the data to be validated.  The only required key in the
-field definition is C<type>, which defines how that element in the
-data/config hash should be validated.
+single field in the data structure to be validated.  The only required
+key in the field definition is C<type>, which defines how that element
+in the data/config hash should be validated.
 
 =head2 VALIDATION TYPES
 
@@ -815,6 +880,18 @@ it.  It accepts the following arguments:
 A validation schema as described in the L<SCHEMA DEFINITION> section
 above. 
 
+=item * data_path
+
+If this is set to true, and the C<Data::Path> module is available,
+then the C<validate> method/function will encapsulate the results
+returned in a C<Data::Path> instance.  Defaults to false;
+
+=item * data_path_options
+
+If the C<data_path> option is true, then this should be a hash
+reference to be passed in as the second argument to the C<Data:Path>
+constructor.
+
 =item * array_allows_scalar
 
 If this is true, then scalars will be autopromoted to a single element
@@ -853,6 +930,11 @@ C<config> parameter should be the data structure/config to be validated,
 and the C<schema> parameter should be the schema.
 
   my $result = validate(config => $config, schema => $schema)
+
+The C<config> parameter above can be a hash reference, or it can be a
+C<Config::General> object.  If it is a C<Config::General> object, then
+the validate sub will automatically call the C<getall> method on the
+object.
 
 If any errors are encountered, then the validate sub will call die to
 throw an exception.  In that case the value of C<$@> contain an error
